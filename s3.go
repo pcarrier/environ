@@ -18,7 +18,8 @@ func s3func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, 
 	region := ""
 	profile := ""
 	endpoint := ""
-	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "bucket", &bucket, "prefix?", &prefix, "region?", &region, "profile?", &profile, "endpoint?", &endpoint); err != nil {
+	conservative := false
+	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "bucket", &bucket, "region", &region, "prefix?", &prefix, "profile?", &profile, "endpoint?", &endpoint, "conservative?", &conservative); err != nil {
 		return nil, err
 	}
 	if prefix == "" {
@@ -34,9 +35,7 @@ func s3func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, 
 	if err != nil {
 		return nil, err
 	}
-	if region != "" {
-		cfg.Region = region
-	}
+	cfg.Region = region
 	var client *s3.Client
 	if endpoint != "" {
 		client = s3.NewFromConfig(cfg, func(o *s3.Options) {
@@ -47,16 +46,18 @@ func s3func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, 
 		client = s3.NewFromConfig(cfg)
 	}
 	return S3{
-		client: client,
-		bucket: bucket,
-		prefix: prefix,
+		client:       client,
+		bucket:       bucket,
+		prefix:       prefix,
+		conservative: conservative,
 	}, nil
 }
 
 type S3 struct {
-	client *s3.Client
-	bucket string
-	prefix string
+	client       *s3.Client
+	bucket       string
+	prefix       string
+	conservative bool
 }
 
 func (s S3) Get(key string) ([]byte, error) {
@@ -75,21 +76,31 @@ func (s S3) Get(key string) ([]byte, error) {
 	return body, nil
 }
 
-func realS3WriteError(err error) bool {
-	return err != nil && !strings.Contains(err.Error(), "PreconditionFailed")
-}
-
 func (s S3) Write(key string, value []byte) error {
-	_, err := s.client.PutObject(context.Background(), &s3.PutObjectInput{
-		Bucket:      aws.String(s.bucket),
-		Key:         aws.String(s.prefix + "/" + key),
-		Body:        strings.NewReader(string(value)),
-		IfNoneMatch: aws.String("*"),
-	})
-	if realS3WriteError(err) {
-		return err
+	var err error
+	fullKey := s.prefix + "/" + key
+	if s.conservative {
+		_, err = s.client.HeadObject(context.Background(), &s3.HeadObjectInput{
+			Bucket: aws.String(s.bucket),
+			Key:    aws.String(fullKey),
+		})
+		if err == nil {
+			return nil // already exists
+		}
 	}
-	return nil
+	input := &s3.PutObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(fullKey),
+		Body:   strings.NewReader(string(value)),
+	}
+	if !s.conservative {
+		input.IfNoneMatch = aws.String("*")
+	}
+	_, err = s.client.PutObject(context.Background(), input)
+	if err != nil && strings.Contains(err.Error(), "PreconditionFailed") {
+		return nil
+	}
+	return err
 }
 
 func (s S3) String() string {
