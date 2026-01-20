@@ -17,7 +17,8 @@ func s3func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, 
 	prefix := ""
 	region := ""
 	profile := ""
-	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "bucket", &bucket, "prefix?", &prefix, "region?", &region, "profile?", &profile); err != nil {
+	endpoint := ""
+	if err := starlark.UnpackArgs(fn.Name(), args, kwargs, "bucket", &bucket, "prefix?", &prefix, "region?", &region, "profile?", &profile, "endpoint?", &endpoint); err != nil {
 		return nil, err
 	}
 	if prefix == "" {
@@ -36,7 +37,15 @@ func s3func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, 
 	if region != "" {
 		cfg.Region = region
 	}
-	client := s3.NewFromConfig(cfg)
+	var client *s3.Client
+	if endpoint != "" {
+		client = s3.NewFromConfig(cfg, func(o *s3.Options) {
+			o.BaseEndpoint = aws.String(endpoint)
+			o.UsePathStyle = true
+		})
+	} else {
+		client = s3.NewFromConfig(cfg)
+	}
 	return S3{
 		client: client,
 		bucket: bucket,
